@@ -1,458 +1,405 @@
-#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
-#include <string>
 #include <vector>
 
+int n; // number of maximum entries;
+int blockCnt = 1;
 using namespace std;
 
-void setId();
-int BLOCKSIZE;
-int blockCnt;
+class Node;
+std::vector<Node *> blocks;
 
-struct Entry {
-  int key = -1, ptr = -1;
+class Node {
+public:
+  bool isLeaf;
+  vector<int> keys;
+  int BID;
+  vector<int> values;
+  Node *next;
+  vector<Node *> pointers;
+
+  Node(bool leaf) : isLeaf(leaf), next(nullptr) {
+    BID = blockCnt++;
+    blocks.push_back(this);
+  }
 };
 
-struct Block {
-  int blockId = -1;
-  int ptr = -1;
-  Entry *entries;
-  Block *parent = nullptr;
-  vector<Block *> kids;
+class BPlusTree {
+private:
+  Node *root;
+  int n;
 
-  Block() { entries = new Entry[BLOCKSIZE / 8]; }
+public:
+  BPlusTree(int n) : root(nullptr), n(n) {}
 
-  ~Block() { delete[] entries; }
-};
+  void insert(int key, int value) {
+    if (!root) {
+      root = new Node(true);
+      root->keys.push_back(key);
+      root->values.push_back(value);
+      return;
+    }
 
-struct Header {
-  int blockSize = 0;
-  int rootId = 0;
-  int depth = 0;
-};
+    Node *leafNode = findLeafNode(root, key);
 
-struct BplusTree {
-  Block *node = nullptr;
-  Header header;
-};
-
-BplusTree root;
-
-Block *searchForInsert(int key) {
-  Block *curNode = root.node;
-  while (curNode && !curNode->kids.empty()) {
-    if (key < curNode->entries[0].key) {
-      curNode = curNode->kids[0];
+    if (leafNode->keys.size() < n) {
+      insertIntoLeaf(leafNode, key, value);
     } else {
-      int i = 1;
-      while (i < BLOCKSIZE / 8 && key >= curNode->entries[i].key &&
-             curNode->entries[i].key != -1) {
-        ++i;
-      }
-      curNode = curNode->kids[i];
-    }
-  }
-  return curNode;
-}
+      Node *newLeaf = new Node(true);
+      splitLeafNode(leafNode, newLeaf, key, value);
 
-bool cmp(const pair<int, int> &a, const pair<int, int> &b) {
-  return a.first < b.first;
-}
-
-bool cmp2(const pair<pair<int, int>, Block *> &a,
-          const pair<pair<int, int>, Block *> &b) {
-  return a.first.first < b.first.first;
-}
-
-void split(Block *c1, Block *c2, int upKey, int cnt) {
-  Block *parNode = c1->parent;
-  if (!parNode) {
-    Block *newPar = new Block;
-    newPar->kids = {c1, c2};
-    newPar->ptr = c1->blockId;
-    Block *tmp = c2;
-    while (!tmp->kids.empty())
-      tmp = tmp->kids[0];
-    newPar->entries[0] = {cnt == 1 ? upKey : tmp->entries[0].key, c2->blockId};
-    newPar->blockId = ++blockCnt;
-    c1->parent = c2->parent = newPar;
-    root.node = newPar;
-    root.header.depth++;
-  } else if (parNode->entries[BLOCKSIZE / 8 - 1].key == -1) {
-    int newEntry = 0;
-    while (parNode->entries[newEntry].key != -1)
-      newEntry++;
-
-    vector<pair<pair<int, int>, Block *>> arr;
-    for (int i = 0; i < newEntry; ++i)
-      arr.push_back({{parNode->entries[i].key, parNode->entries[i].ptr},
-                     parNode->kids[i + 1]});
-
-    Block *tmp = c2;
-    while (!tmp->kids.empty())
-      tmp = tmp->kids[0];
-    arr.push_back({{cnt == 1 ? upKey : tmp->entries[0].key, c2->blockId}, c2});
-
-    sort(arr.begin(), arr.end(), cmp2);
-
-    parNode->kids = {parNode->kids[0]};
-    for (int i = 0; i <= newEntry; ++i) {
-      parNode->entries[i] = {arr[i].first.first, arr[i].first.second};
-      parNode->kids.push_back(arr[i].second);
-    }
-    c2->parent = parNode;
-  } else {
-    Block *newNode = new Block;
-    newNode->blockId = ++blockCnt;
-    int overNum = BLOCKSIZE / 8 + 1;
-    vector<pair<pair<int, int>, Block *>> arr(overNum + 1);
-    arr[0] = {{-1, parNode->ptr}, parNode->kids[0]};
-
-    for (int i = 1; i < overNum; ++i) {
-      arr[i] = {{parNode->entries[i - 1].key, parNode->entries[i - 1].ptr},
-                parNode->kids[i]};
-    }
-    Block *tmp = c2;
-    while (!tmp->kids.empty())
-      tmp = tmp->kids[0];
-    arr[overNum] = {{cnt == 1 ? upKey : tmp->entries[0].key, c2->blockId}, c2};
-
-    sort(arr.begin(), arr.end(), cmp2);
-
-    int rest = (overNum + 1) / 2;
-    parNode->kids = {arr[0].second};
-    arr[0].second->parent = parNode;
-    for (int i = 1; i < rest; ++i) {
-      parNode->entries[i - 1] = {arr[i].first.first, arr[i].first.second};
-      parNode->kids.push_back(arr[i].second);
-      arr[i].second->parent = parNode;
-    }
-
-    newNode->ptr = arr[rest].first.second;
-    newNode->kids.push_back(arr[rest].second);
-    arr[rest].second->parent = newNode;
-    for (int i = rest + 1; i <= overNum; ++i) {
-      newNode->entries[i - (rest + 1)] = {arr[i].first.first,
-                                          arr[i].first.second};
-      newNode->kids.push_back(arr[i].second);
-      arr[i].second->parent = newNode;
-    }
-
-    split(parNode, newNode, c2->entries[0].key, cnt + 1);
-  }
-}
-
-void insert(int key, int value) {
-  Block *curNode = searchForInsert(key);
-  if (!curNode) {
-    curNode = new Block;
-    root.node = curNode;
-    curNode->blockId = ++blockCnt;
-  }
-
-  if (curNode->entries[BLOCKSIZE / 8 - 1].key == -1) {
-    vector<pair<int, int>> tmp;
-    for (int i = 0; i < BLOCKSIZE / 8 && curNode->entries[i].key != -1; ++i) {
-      tmp.push_back({curNode->entries[i].key, curNode->entries[i].ptr});
-    }
-    tmp.push_back({key, value});
-    sort(tmp.begin(), tmp.end(), cmp);
-    for (size_t i = 0; i < tmp.size(); ++i) {
-      curNode->entries[i] = {tmp[i].first, tmp[i].second};
-    }
-  } else {
-    int overNum = BLOCKSIZE / 8 + 1;
-    vector<pair<int, int>> arr;
-    for (int i = 0; i < BLOCKSIZE / 8; ++i) {
-      arr.push_back({curNode->entries[i].key, curNode->entries[i].ptr});
-    }
-    arr.push_back({key, value});
-    sort(arr.begin(), arr.end(), cmp);
-
-    Block *newBlock = new Block;
-    newBlock->blockId = ++blockCnt;
-
-    int c1 = overNum / 2;
-    for (int i = 0; i < c1; ++i) {
-      curNode->entries[i] = {arr[i].first, arr[i].second};
-    }
-    for (int i = c1; i < BLOCKSIZE / 8; ++i) {
-      curNode->entries[i] = {-1, -1};
-    }
-    for (int i = 0; i < overNum - c1; ++i) {
-      newBlock->entries[i] = {arr[i + c1].first, arr[i + c1].second};
-    }
-
-    curNode->ptr = newBlock->blockId;
-    split(curNode, newBlock, newBlock->entries[0].key, 1);
-  }
-}
-
-void insertHeader(const string &fileName) {
-  root.header.blockSize = BLOCKSIZE;
-  if (root.node)
-    root.header.rootId = root.node->blockId;
-
-  fstream btree{fileName, ios::out | ios::binary};
-  btree.write(reinterpret_cast<char *>(&root.header), sizeof(Header));
-}
-
-void fillBlanks(const string &fileOut) {
-  fstream btree{fileOut, ios::out | ios::binary};
-  int tmp = 0;
-  for (int i = 0; i < blockCnt; ++i) {
-    btree.seekp(i * BLOCKSIZE + 12);
-    btree.write(reinterpret_cast<char *>(&tmp), BLOCKSIZE);
-  }
-}
-
-void writeToFile(Block *b, fstream &btree) {
-  if (b->kids.empty()) {
-    btree.seekp((b->blockId - 1) * BLOCKSIZE + 12);
-    for (int i = 0; i < BLOCKSIZE / 8; ++i)
-      btree.write(reinterpret_cast<char *>(&b->entries[i]), sizeof(Entry));
-    btree.write(reinterpret_cast<char *>(&b->ptr), sizeof(int));
-  } else {
-    btree.seekp((b->blockId - 1) * BLOCKSIZE + 12);
-    btree.write(reinterpret_cast<char *>(&b->ptr), sizeof(int));
-    for (int i = 0; i < BLOCKSIZE / 8; ++i)
-      btree.write(reinterpret_cast<char *>(&b->entries[i]), sizeof(Entry));
-    for (auto kid : b->kids)
-      writeToFile(kid, btree);
-  }
-}
-
-void insertNodes(const string &fileIn, const string &fileOut) {
-  fstream input{fileIn};
-  int key, value;
-  char delimiter;
-
-  fstream btree{fileOut, ios::in | ios::binary};
-  btree.read(reinterpret_cast<char *>(&BLOCKSIZE), sizeof(int));
-  btree.close();
-  if (BLOCKSIZE == 0) {
-    cout << "Block size is 0\n";
-    exit(1);
-  }
-
-  while (input >> key >> delimiter >> value)
-    insert(key, value);
-
-  fillBlanks(fileOut);
-  insertHeader(fileOut);
-  setId();
-
-  btree.open(fileOut, ios::in | ios::out | ios::binary);
-  writeToFile(root.node, btree);
-}
-
-void PointSearch(const string &fileIn, const string &fileIn2,
-                 const string &fileOut2) {
-  fstream search{fileIn};
-  fstream out{fileOut2, ios::out};
-  int key;
-
-  while (search >> key) {
-    fstream f{fileIn2, ios::in | ios::binary};
-    f.read(reinterpret_cast<char *>(&BLOCKSIZE), sizeof(int));
-    int idx, depth;
-    f.seekg(4);
-    f.read(reinterpret_cast<char *>(&idx), sizeof(int));
-    f.read(reinterpret_cast<char *>(&depth), sizeof(int));
-
-    Block tmp;
-    while (depth--) {
-      f.seekg((idx - 1) * BLOCKSIZE + 12);
-      f.read(reinterpret_cast<char *>(&tmp.ptr), sizeof(int));
-      for (int i = 0; i < BLOCKSIZE / 8; ++i) {
-        f.read(reinterpret_cast<char *>(&tmp.entries[i]), sizeof(Entry));
-      }
-      if (key < tmp.entries[0].key) {
-        idx = tmp.ptr;
+      if (leafNode == root) {
+        Node *newRoot = new Node(false);
+        newRoot->pointers.push_back(leafNode);
+        newRoot->pointers.push_back(newLeaf);
+        newRoot->keys.push_back(newLeaf->keys[0]);
+        root = newRoot;
       } else {
-        for (int i = 1; i < BLOCKSIZE / 8; ++i) {
-          if (key < tmp.entries[i].key || tmp.entries[i].key == -1) {
-            idx = tmp.entries[i - 1].ptr;
-            break;
-          }
-          if (i == BLOCKSIZE / 8 - 1) {
-            idx = tmp.entries[i].ptr;
-          }
+        insertIntoParent(leafNode, newLeaf->keys[0], newLeaf);
+      }
+    }
+  }
+
+  Node *findLeafNode(Node *node, int key) {
+    while (!node->isLeaf) {
+      int i = 0;
+      while (i < node->keys.size() && key >= node->keys[i])
+        i++;
+      node = node->pointers[i];
+    }
+    return node;
+  }
+
+  void insertIntoLeaf(Node *leaf, int key, int value) {
+    auto it = lower_bound(leaf->keys.begin(), leaf->keys.end(), key);
+    int index = distance(leaf->keys.begin(), it);
+    leaf->keys.insert(it, key);
+    leaf->values.insert(leaf->values.begin() + index, value);
+  }
+
+  void splitLeafNode(Node *oldLeaf, Node *newLeaf, int key, int value) {
+    insertIntoLeaf(oldLeaf, key, value);
+    int midIndex = oldLeaf->keys.size() / 2;
+
+    newLeaf->keys.assign(oldLeaf->keys.begin() + midIndex, oldLeaf->keys.end());
+    newLeaf->values.assign(oldLeaf->values.begin() + midIndex,
+                           oldLeaf->values.end());
+
+    oldLeaf->keys.resize(midIndex);
+    oldLeaf->values.resize(midIndex);
+
+    newLeaf->next = oldLeaf->next;
+    oldLeaf->next = newLeaf;
+  }
+
+  void insertIntoParent(Node *oldNode, int key, Node *newNode) {
+    Node *parent = findParent(root, oldNode);
+    if (!parent) {
+      Node *newRoot = new Node(false);
+      newRoot->keys.push_back(key);
+      newRoot->pointers.push_back(oldNode);
+      newRoot->pointers.push_back(newNode);
+      root = newRoot;
+      return;
+    }
+
+    auto it = lower_bound(parent->keys.begin(), parent->keys.end(), key);
+    int index = distance(parent->keys.begin(), it);
+    parent->keys.insert(it, key);
+    parent->pointers.insert(parent->pointers.begin() + index + 1, newNode);
+
+    if (parent->keys.size() > n) {
+      splitNonLeafNode(parent);
+    }
+  }
+
+  void splitNonLeafNode(Node *node) {
+    int midIndex = node->keys.size() / 2;
+    Node *newChild = new Node(false);
+
+    newChild->keys.assign(node->keys.begin() + midIndex + 1, node->keys.end());
+    newChild->pointers.assign(node->pointers.begin() + midIndex + 1,
+                              node->pointers.end());
+
+    node->keys.resize(midIndex);
+    node->pointers.resize(midIndex + 1);
+
+    Node *parent = findParent(root, node);
+    if (!parent) {
+      Node *newRoot = new Node(false);
+      newRoot->keys.push_back(node->keys[midIndex]);
+      newRoot->pointers.push_back(node);
+      newRoot->pointers.push_back(newChild);
+      root = newRoot;
+    } else {
+      insertIntoParent(node, node->keys[midIndex], newChild);
+    }
+  }
+
+  Node *findParent(Node *parentNode, Node *childNode) {
+    if (!parentNode || parentNode->isLeaf) {
+      return nullptr;
+    }
+
+    for (Node *pointer : parentNode->pointers) {
+      if (pointer == childNode) {
+        return parentNode;
+      }
+
+      Node *fromLowerLevel = findParent(pointer, childNode);
+      if (fromLowerLevel) {
+        return fromLowerLevel;
+      }
+    }
+    return nullptr;
+  }
+
+  int calcDepth() {
+    int depth = 0;
+    Node *curNode = root;
+    while (!curNode->isLeaf) {
+      curNode = curNode->pointers[0];
+      depth++;
+    }
+    return depth;
+  }
+
+  void check() {
+    ofstream outputFile("print.txt");
+
+    if (outputFile.is_open()) {
+      outputFile << "<0>" << endl;
+      for (int i : root->keys) {
+        outputFile << i << ", ";
+      }
+      outputFile << "\n<1>" << endl;
+      for (Node *p : root->pointers) {
+        for (int i : p->keys) {
+          outputFile << i << ", ";
         }
       }
-    }
-    f.seekg((idx - 1) * BLOCKSIZE + 12);
-    for (int i = 0; i < BLOCKSIZE / 8; ++i) {
-      f.read(reinterpret_cast<char *>(&tmp.entries[i]), sizeof(Entry));
-    }
-    for (int i = 0; i < BLOCKSIZE / 8; ++i) {
-      if (key == tmp.entries[i].key) {
-        out << key << "|" << tmp.entries[i].ptr << '\n';
-      }
+
+      outputFile.close();
+    } else {
+      cout << "error" << endl;
     }
   }
-}
 
-void RangeSearch(const string &fileIn, const string &fileOut,
-                 const string &fileOut2) {
-  fstream search{fileIn};
-  int a, b;
-  char delimiter;
-  fstream out{fileOut2, ios::out};
+  void insertBin(const char *fileName) {
+    int blockSize = n * 8 + 4;
+    int rootBid = root->BID;
+    int depth = calcDepth();
+    int zero = 0;
+    cout << "총 블럭 수는:" << blockCnt;
+    FILE *file = fopen(fileName, "wb");
+    if (file != nullptr) {
+      fwrite(&blockSize, sizeof(int), 1, file);
+      fwrite(&rootBid, sizeof(int), 1, file);
+      fwrite(&depth, sizeof(int), 1, file);
 
-  while (search >> a >> delimiter >> b) {
-    fstream f{fileOut, ios::in | ios::binary};
-    f.read(reinterpret_cast<char *>(&BLOCKSIZE), sizeof(int));
-    int idx, depth;
-    f.seekg(4);
-    f.read(reinterpret_cast<char *>(&idx), sizeof(int));
-    f.read(reinterpret_cast<char *>(&depth), sizeof(int));
-
-    Block tmp;
-    while (depth--) {
-      f.seekg((idx - 1) * BLOCKSIZE + 12);
-      f.read(reinterpret_cast<char *>(&tmp.ptr), sizeof(int));
-      for (int i = 0; i < BLOCKSIZE / 8; ++i) {
-        f.read(reinterpret_cast<char *>(&tmp.entries[i]), sizeof(Entry));
-      }
-      if (a < tmp.entries[0].key) {
-        idx = tmp.ptr;
-      } else {
-        for (int i = 1; i < BLOCKSIZE / 8; ++i) {
-          if (a < tmp.entries[i].key || tmp.entries[i].key == -1) {
-            idx = tmp.entries[i - 1].ptr;
-            break;
-          }
-          if (i == BLOCKSIZE / 8 - 1) {
-            idx = tmp.entries[i].ptr;
+      for (Node *curNode : blocks) {
+        for (int k = 0; k < n; k++) {
+          if (curNode->isLeaf) {
+            if (k < curNode->keys.size()) {
+              fwrite(&curNode->keys[k], sizeof(int), 1, file);
+              fwrite(&curNode->values[k], sizeof(int), 1, file);
+            } else {
+              fwrite(&zero, sizeof(int), 2, file);
+            }
+          } else {
+            if (k < curNode->keys.size()) {
+              fwrite(&curNode->pointers[k]->BID, sizeof(int), 1, file);
+              fwrite(&curNode->keys[k], sizeof(int), 1, file);
+            } else {
+              fwrite(&zero, sizeof(int), 2, file);
+            }
           }
         }
+        if (curNode->isLeaf) {
+          if (curNode->next) {
+            fwrite(&curNode->next->BID, sizeof(int), 1, file);
+          } else {
+            fwrite(&zero, sizeof(int), 1, file);
+          }
+        } else {
+          fwrite(&curNode->pointers.back()->BID, sizeof(int), 1, file);
+        }
+      }
+
+      fclose(file);
+    } else {
+      cout << "Error1" << endl;
+    }
+  }
+
+  int printing(const char *fileName) {
+    ofstream outputFile("print.txt");
+
+    int blockSize, rootBid, depth;
+    ifstream binfile(fileName, std::ios::binary);
+    binfile.read(reinterpret_cast<char *>(&blockSize), sizeof(blockSize));
+    binfile.read(reinterpret_cast<char *>(&rootBid), sizeof(rootBid));
+    binfile.read(reinterpret_cast<char *>(&depth), sizeof(depth));
+
+    n = (blockSize - 4) / 8;
+    binfile.seekg(12 + blockSize * (rootBid), std::ios::beg);
+
+    outputFile << "<0>" << endl;
+    int pointer, key;
+    binfile.read(reinterpret_cast<char *>(&pointer), sizeof(pointer));
+    outputFile << pointer << ", ";
+    for (int k = 0; k < n; k++) {
+      binfile.read(reinterpret_cast<char *>(&key), sizeof(key));
+      binfile.read(reinterpret_cast<char *>(&pointer), sizeof(pointer));
+      if (key != 0 && key != 2) {
+        outputFile << key << ",";
       }
     }
-    f.seekg((idx - 1) * BLOCKSIZE + 12);
-    for (int i = 0; i < BLOCKSIZE / 8; ++i) {
-      f.read(reinterpret_cast<char *>(&tmp.entries[i]), sizeof(Entry));
-    }
-    f.read(reinterpret_cast<char *>(&tmp.ptr), sizeof(int));
-    int probe = 0;
-    for (int i = 0; i < BLOCKSIZE / 8; ++i) {
-      if (a <= tmp.entries[i].key) {
-        probe = i;
-        break;
+
+    outputFile << endl << "<1>" << endl;
+    binfile.seekg(12 + blockSize * pointer, std::ios::beg);
+    for (int k = 0; k < n; k++) {
+      binfile.read(reinterpret_cast<char *>(&key), sizeof(key));
+      binfile.read(reinterpret_cast<char *>(&pointer), sizeof(pointer));
+      if (key != 0) {
+        outputFile << key << ",";
       }
     }
-    while (tmp.entries[probe].key <= b) {
-      if (tmp.entries[probe].key >= a) {
-        out << tmp.entries[probe].key << "|" << tmp.entries[probe].ptr << ' ';
+
+    binfile.close();
+    outputFile.close();
+    return 0;
+  }
+
+  int reading(const char *fileName, int searchKey) {
+    int blockSize, rootBid, depth;
+    ifstream binfile(fileName, std::ios::binary);
+    binfile.read(reinterpret_cast<char *>(&blockSize), sizeof(blockSize));
+    binfile.read(reinterpret_cast<char *>(&rootBid), sizeof(rootBid));
+    binfile.read(reinterpret_cast<char *>(&depth), sizeof(depth));
+
+    n = (blockSize - 4) / 8;
+    int nodeBid = rootBid;
+    for (int i = 0; i < depth; i++) {
+      vector<int> keys, pointers;
+      int p, v;
+
+      binfile.seekg(12 + blockSize * nodeBid, std::ios::beg);
+      binfile.read(reinterpret_cast<char *>(&p), sizeof(p));
+      pointers.push_back(p);
+
+      for (int k = 0; k < n; k++) {
+        binfile.read(reinterpret_cast<char *>(&v), sizeof(v));
+        binfile.read(reinterpret_cast<char *>(&p), sizeof(p));
+        keys.push_back(v);
+        pointers.push_back(p);
       }
-      if (++probe == BLOCKSIZE / 8 || tmp.entries[probe].key == -1) {
-        if (tmp.ptr == -1)
+
+      int k;
+      for (k = 0; k < n; k++) {
+        if (keys[k] >= searchKey) {
           break;
-        f.seekg((tmp.ptr - 1) * BLOCKSIZE + 12);
-        for (int i = 0; i < BLOCKSIZE / 8; ++i) {
-          f.read(reinterpret_cast<char *>(&tmp.entries[i]), sizeof(Entry));
         }
-        f.read(reinterpret_cast<char *>(&tmp.ptr), sizeof(int));
-        probe = 0;
+      }
+      nodeBid = pointers[k];
+    }
+
+    vector<int> keys, values;
+    binfile.seekg(12 + blockSize * nodeBid, std::ios::beg);
+    for (int k = 0; k < n; k++) {
+      int key, value;
+      binfile.read(reinterpret_cast<char *>(&key), sizeof(key));
+      binfile.read(reinterpret_cast<char *>(&value), sizeof(value));
+      keys.push_back(key);
+      values.push_back(value);
+    }
+
+    for (int k = 0; k < n; k++) {
+      if (keys[k] == searchKey) {
+        binfile.close();
+        return values[k];
       }
     }
-    out << '\n';
+
+    binfile.close();
+    return -1;
   }
-}
+};
 
-void print2LVs(const string &fileIn, const string &fileOut) {
-  fstream f{fileIn, ios::in | ios::binary};
-  fstream out{fileOut, ios::out};
-
-  int idx, depth;
-  f.read(reinterpret_cast<char *>(&BLOCKSIZE), sizeof(int));
-  f.seekg(4);
-  f.read(reinterpret_cast<char *>(&idx), sizeof(int));
-  f.read(reinterpret_cast<char *>(&depth), sizeof(int));
-
-  Block block;
-  int *ptrs = new int[BLOCKSIZE / 8 + 1];
-  f.seekg((idx - 1) * BLOCKSIZE + 12);
-  f.read(reinterpret_cast<char *>(&block.ptr), sizeof(int));
-  ptrs[0] = block.ptr;
-
-  out << "<0>\n\n";
-  for (int i = 1; i <= BLOCKSIZE / 8; ++i) {
-    f.read(reinterpret_cast<char *>(&block.entries[i - 1]), sizeof(Entry));
-    if (block.entries[i - 1].key == -1)
-      break;
-    out << block.entries[i - 1].key << ',';
-    ptrs[i] = block.entries[i - 1].ptr;
-  }
-
-  out << "\n\n<1>\n\n";
-  int cnt = 0;
-  while (cnt < BLOCKSIZE / 8 && ptrs[cnt] != -1) {
-    f.seekg((ptrs[cnt] - 1) * BLOCKSIZE + 16);
-    for (int i = 0; i < BLOCKSIZE / 8; ++i) {
-      f.read(reinterpret_cast<char *>(&block.entries[i]), sizeof(Entry));
-      if (block.entries[i].key == -1)
-        break;
-      out << block.entries[i].key << ", ";
+int main(int argc, char *argv[]) {
+  blockCnt = 0;
+  char command = argv[1][0];
+  const char *fileName = argv[2];
+  switch (command) {
+  case 'c': {
+    int blockSize = atoi(argv[3]);
+    FILE *file = fopen(fileName, "wb");
+    if (file != nullptr) {
+      int zero = 0;
+      fwrite(&blockSize, sizeof(int), 1, file);
+      fwrite(&zero, sizeof(int), 2, file);
+      fclose(file);
+    } else {
+      cout << "Error1" << endl;
     }
-    ++cnt;
-  }
-
-  out << '\n';
-  out.close();
-  delete[] ptrs;
-}
-
-vector<Block *> totalKids;
-
-void getKids(Block *b) {
-  if (b->kids.empty()) {
-    for (auto kid : b->parent->kids)
-      totalKids.push_back(kid);
-  } else {
-    for (auto kid : b->kids)
-      getKids(kid);
-  }
-}
-
-void setId() {
-  getKids(root.node);
-  for (size_t i = 0; i < totalKids.size(); ++i) {
-    totalKids[i]->ptr =
-        (i + 1 < totalKids.size()) ? totalKids[i + 1]->blockId : -1;
-  }
-}
-
-int main(int argc, char **argv) {
-  string fileIn, btree, fileOut2, tmp;
-  switch (argv[1][0]) {
-  case 'c':
-    btree = argv[2];
-    BLOCKSIZE = stoi(argv[3]);
-    insertHeader(btree);
-    break;
-  case 'i':
-    btree = argv[2];
-    fileIn = argv[3];
-    insertNodes(fileIn, btree);
-    break;
-  case 's':
-    btree = argv[2];
-    fileIn = argv[3];
-    fileOut2 = argv[4];
-    PointSearch(fileIn, btree, fileOut2);
-    break;
-  case 'r':
-    btree = argv[2];
-    fileIn = argv[3];
-    fileOut2 = argv[4];
-    RangeSearch(fileIn, btree, fileOut2);
-    break;
-  case 'p':
-    fileIn = argv[2];
-    btree = argv[3];
-    print2LVs(fileIn, btree);
     break;
   }
+  case 'i': {
+    ifstream binfile(fileName, ios::binary);
+    int blockSize;
+    binfile.read(reinterpret_cast<char *>(&blockSize), sizeof(blockSize));
+    n = (blockSize - 4) / 8;
+    ifstream input(argv[3]);
+    if (!input) {
+      cerr << "Error2";
+      return 1;
+    }
+    BPlusTree btree(n);
+
+    char k[100], v[100];
+    while (input.getline(k, sizeof(k), '|') && input.getline(v, sizeof(v))) {
+      int key = atoi(k);
+      int value = atoi(v);
+      btree.insert(key, value);
+    }
+    btree.check();
+    binfile.close();
+    btree.insertBin(fileName);
+    break;
+  }
+  case 's': {
+    ifstream binfile(fileName, std::ios::binary);
+    int blockSize;
+    binfile.read(reinterpret_cast<char *>(&blockSize), sizeof(blockSize));
+    n = (blockSize - 4) / 8;
+    binfile.close();
+    BPlusTree btree(n);
+    ifstream input(argv[3]);
+    int numb;
+    ofstream outputFile(argv[4]);
+    while (input >> numb) {
+      int val = btree.reading(fileName, numb);
+      outputFile << numb << "|" << val << endl;
+    }
+    outputFile.close();
+    break;
+  }
+  case 'r': {
+    break;
+  }
+  case 'p': {
+    ifstream binfile(fileName, std::ios::binary);
+    int blockSize;
+    binfile.read(reinterpret_cast<char *>(&blockSize), sizeof(blockSize));
+    n = (blockSize - 4) / 8;
+    binfile.close();
+    BPlusTree btree(n);
+    btree.printing(fileName);
+    break;
+  }
+  }
+
+  return 0;
 }
